@@ -24,6 +24,7 @@ try
     Console.WriteLine($"knowledge_base_replacement_count: {result.KnowledgeBaseReplacements.Count}");
     Console.WriteLine($"unmapped_knowledge_base_count: {result.UnmappedKnowledgeBases.Count}");
     Console.WriteLine($"output: {result.OutputPath}");
+    Console.WriteLine();
 
     if (result.Replacements.Count > 0)
     {

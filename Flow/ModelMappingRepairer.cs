@@ -550,6 +550,27 @@ public sealed class ModelMappingRepairer
         designParams["module"] = KnowledgeBasePluginName;
         pluginObject["pluginName"] = KnowledgeBasePluginName;
         var changed = true;
+        var functions = pluginObject["functions"] as JArray;
+
+        if (functions != null)
+        {
+            foreach (var function in functions.OfType<JObject>())
+            {
+                if (function["parameters"] is not JArray parameters)
+                {
+                    continue;
+                }
+
+                for (var index = parameters.Count - 1; index >= 0; index--)
+                {
+                    if (parameters[index] is JObject parameter &&
+                        string.Equals(ReadString(parameter["param_name"]), "domain", StringComparison.OrdinalIgnoreCase))
+                    {
+                        parameters.RemoveAt(index);
+                    }
+                }
+            }
+        }
 
         if (knowledgeBaseMappings.Count == 0)
         {
@@ -560,7 +581,7 @@ public sealed class ModelMappingRepairer
         var nodeName = ReadString(nodeObject["name"]) ?? ReadString(designParams["name"]) ?? string.Empty;
         var inputs = designParams["input"] as JArray;
 
-        if (pluginObject["functions"] is JArray functions)
+        if (functions != null)
         {
             foreach (var function in functions.OfType<JObject>())
             {

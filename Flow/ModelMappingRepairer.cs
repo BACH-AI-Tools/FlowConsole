@@ -168,6 +168,11 @@ public sealed class ModelMappingRepairer
     private const string KnowledgeBasePluginUuid = "b3e1a8d45f3b4b8e9c2e1f2a3b4c5d6e";
 
     /// <summary>
+    /// 知识库插件迁移后的展示名称。
+    /// </summary>
+    private const string KnowledgeBasePluginName = "知识库插件Pro";
+
+    /// <summary>
     /// 执行完整的模型映射修复流程。
     /// </summary>
     /// <param name="options">修复命令参数。</param>
@@ -536,14 +541,21 @@ public sealed class ModelMappingRepairer
         List<KnowledgeBaseReplacementRecord> replacements,
         List<UnmappedKnowledgeBaseRecord> unmappedKnowledgeBases)
     {
-        if (knowledgeBaseMappings.Count == 0 ||
-            designParams["plugin"] is not JObject pluginObject ||
+        if (designParams["plugin"] is not JObject pluginObject ||
             !string.Equals(ReadString(pluginObject["pluginUUID"]), KnowledgeBasePluginUuid, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        var changed = false;
+        designParams["module"] = KnowledgeBasePluginName;
+        pluginObject["pluginName"] = KnowledgeBasePluginName;
+        var changed = true;
+
+        if (knowledgeBaseMappings.Count == 0)
+        {
+            return changed;
+        }
+
         var nodeId = ReadString(nodeObject["nodeId"]) ?? ReadString(nodeObject["id"]) ?? string.Empty;
         var nodeName = ReadString(nodeObject["name"]) ?? ReadString(designParams["name"]) ?? string.Empty;
         var inputs = designParams["input"] as JArray;

@@ -63,7 +63,9 @@ public sealed class MappingExcelSecretSynchronizer
             .FirstOrDefaultAsync(cancellationToken);
     }
 
-    public static IReadOnlyList<ApiCallerSecretMapping> LoadAndValidateApiCallerSecrets(string mappingPath)
+    public static IReadOnlyList<ApiCallerSecretMapping> LoadAndValidateApiCallerSecrets(
+        string mappingPath,
+        List<string>? validationErrors = null)
     {
         using var mappingStream = new FileStream(mappingPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         using var workbook = new XLWorkbook(mappingStream);
@@ -101,24 +103,62 @@ public sealed class MappingExcelSecretSynchronizer
                 continue;
             }
 
-            if (string.IsNullOrWhiteSpace(secretKey) || string.IsNullOrWhiteSpace(secretValue))
-            {
-                throw new InvalidOperationException(
-                    $"apiCaller sheet 第 {row.RowNumber()} 行存在空字段：secretKey 和 secretValue 都必须填写。");
-            }
-
-            secrets.Add(new ApiCallerSecretMapping(secretKey, secretValue));
+            secrets.Add(new ApiCallerSecretMapping(secretKey, secretValue, row.RowNumber()));
         }
 
-        var duplicate = secrets
+        var invalidRows = new List<string>();
+        foreach (var secret in secrets)
+        {
+            var missingColumns = new List<string>();
+            if (string.IsNullOrWhiteSpace(secret.SecretKey))
+            {
+                missingColumns.Add("secretKey");
+            }
+            if (string.IsNullOrWhiteSpace(secret.SecretValue))
+            {
+                missingColumns.Add("secretValue");
+            }
+
+            if (missingColumns.Count > 0)
+            {
+                invalidRows.Add($"第 {secret.RowNumber} 行缺少 {string.Join("、", missingColumns)}");
+            }
+        }
+
+        if (invalidRows.Count > 0)
+        {
+            AddValidationErrorOrThrow(
+                validationErrors,
+                $"apiCaller sheet 存在空字段：{Environment.NewLine}{string.Join(Environment.NewLine, invalidRows)}");
+        }
+
+        var validSecrets = secrets
+            .Where(secret =>
+                !string.IsNullOrWhiteSpace(secret.SecretKey) &&
+                !string.IsNullOrWhiteSpace(secret.SecretValue))
+            .ToList();
+
+        var duplicate = validSecrets
             .GroupBy(secret => secret.SecretKey, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicate != null)
         {
-            throw new InvalidOperationException($"apiCaller sheet 存在重复 secretKey: {duplicate.First().SecretKey}");
+            AddValidationErrorOrThrow(
+                validationErrors,
+                $"apiCaller sheet 存在重复 secretKey: {duplicate.First().SecretKey}");
         }
 
-        return secrets;
+        return validSecrets;
+    }
+
+    private static void AddValidationErrorOrThrow(List<string>? validationErrors, string message)
+    {
+        if (validationErrors == null)
+        {
+            throw new InvalidOperationException(message);
+        }
+
+        validationErrors.Add(message);
     }
 
     private static async Task SaveSecretAsync(
@@ -213,6 +253,6 @@ public sealed class MappingExcelSecretSynchronizer
 
 }
 
-public sealed record ApiCallerSecretMapping(string SecretKey, string SecretValue);
+public sealed record ApiCallerSecretMapping(string SecretKey, string SecretValue, int RowNumber = 0);
 
 public sealed record SecretSyncResult(int TotalCount, int CreatedCount, int UpdatedCount);

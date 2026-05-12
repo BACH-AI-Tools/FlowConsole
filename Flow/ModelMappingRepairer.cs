@@ -20,7 +20,8 @@ public sealed record ModelMapping(
     string NewModelName,
     string NewSettingName,
     int? NewProvider,
-    string? NewSettingLabel);
+    string? NewSettingLabel,
+    int RowNumber = 0);
 
 /// <summary>
 /// 表示第三方知识库名称到当前系统知识库 ID 的映射关系。
@@ -29,7 +30,8 @@ public sealed record ModelMapping(
 /// <param name="LibraryId">当前系统中的知识库 ID。</param>
 public sealed record KnowledgeBaseMapping(
     string KnowledgeBaseName,
-    string LibraryId);
+    string LibraryId,
+    int RowNumber = 0);
 
 /// <summary>
 /// 表示执行模型映射修复时使用的命令参数。
@@ -181,8 +183,14 @@ public sealed class ModelMappingRepairer
     /// <param name="mappingPath">映射清单文件路径。</param>
     public static void ValidateMappingFile(string mappingPath)
     {
-        _ = LoadMappings(mappingPath);
-        _ = MappingExcelSecretSynchronizer.LoadAndValidateApiCallerSecrets(mappingPath);
+        var validationErrors = new List<string>();
+        _ = LoadMappings(mappingPath, validationErrors);
+        _ = MappingExcelSecretSynchronizer.LoadAndValidateApiCallerSecrets(mappingPath, validationErrors);
+
+        if (validationErrors.Count > 0)
+        {
+            throw new InvalidOperationException(string.Join(Environment.NewLine, validationErrors));
+        }
     }
 
     /// <summary>
@@ -825,7 +833,7 @@ public sealed class ModelMappingRepairer
     /// </summary>
     /// <param name="mappingPath">映射清单文件路径。</param>
     /// <returns>通过校验的模型映射和知识库映射。</returns>
-    private static MappingWorkbook LoadMappings(string mappingPath)
+    private static MappingWorkbook LoadMappings(string mappingPath, List<string>? validationErrors = null)
     {
         var extension = Path.GetExtension(mappingPath).ToLowerInvariant();
         if (extension != ".xlsx")
@@ -836,8 +844,8 @@ public sealed class ModelMappingRepairer
         using var mappingStream = new FileStream(mappingPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         using var workbook = new XLWorkbook(mappingStream);
         return new MappingWorkbook(
-            LoadModelMappings(workbook),
-            LoadKnowledgeBaseMappings(workbook));
+            LoadModelMappings(workbook, validationErrors),
+            LoadKnowledgeBaseMappings(workbook, validationErrors));
     }
 
     /// <summary>
@@ -845,7 +853,7 @@ public sealed class ModelMappingRepairer
     /// </summary>
     /// <param name="workbook">Excel 工作簿。</param>
     /// <returns>通过校验的模型映射列表。</returns>
-    private static IReadOnlyList<ModelMapping> LoadModelMappings(XLWorkbook workbook)
+    private static IReadOnlyList<ModelMapping> LoadModelMappings(XLWorkbook workbook, List<string>? validationErrors = null)
     {
         var worksheet = workbook.Worksheets.FirstOrDefault()
             ?? throw new InvalidOperationException("Excel 映射清单没有任何 sheet。");
@@ -891,10 +899,11 @@ public sealed class ModelMappingRepairer
                 GetValue("替换后的模型名称", "newModelName", "new_model", "targetModelName"),
                 GetValue("替换后的模型参数名称", "newSettingName", "new_setting", "targetSettingName"),
                 GetValue("替换后的模型provider", "newProvider", "new_provider", "provider"),
-                GetValue("替换后的模型参数显示名称", "newSettingLabel", "new_setting_label", "settingLabel")));
+                GetValue("替换后的模型参数显示名称", "newSettingLabel", "new_setting_label", "settingLabel"),
+                row.RowNumber()));
         }
 
-        return ValidateMappings(mappings);
+        return ValidateMappings(mappings, validationErrors);
     }
 
     /// <summary>
@@ -902,7 +911,7 @@ public sealed class ModelMappingRepairer
     /// </summary>
     /// <param name="workbook">Excel 工作簿。</param>
     /// <returns>通过校验的知识库映射列表；没有第二个 sheet 时返回空列表。</returns>
-    private static IReadOnlyList<KnowledgeBaseMapping> LoadKnowledgeBaseMappings(XLWorkbook workbook)
+    private static IReadOnlyList<KnowledgeBaseMapping> LoadKnowledgeBaseMappings(XLWorkbook workbook, List<string>? validationErrors = null)
     {
         var worksheet = workbook.Worksheets.Skip(1).FirstOrDefault();
         if (worksheet == null)
@@ -940,10 +949,11 @@ public sealed class ModelMappingRepairer
 
             mappings.Add(new KnowledgeBaseMapping(
                 GetValue("knowledgeBaseName", "knowledge_base_name", "知识库名称", "第三方知识库名称"),
-                GetValue("libraryId", "library_id", "知识库id", "知识库ID")));
+                GetValue("libraryId", "library_id", "知识库id", "知识库ID"),
+                row.RowNumber()));
         }
 
-        return ValidateKnowledgeBaseMappings(mappings);
+        return ValidateKnowledgeBaseMappings(mappings, validationErrors);
     }
 
     /// <summary>
@@ -962,7 +972,8 @@ public sealed class ModelMappingRepairer
         string newModelName,
         string newSettingName,
         string newProvider,
-        string newSettingLabel)
+        string newSettingLabel,
+        int rowNumber)
     {
         return new ModelMapping(
             oldModelName.Trim(),
@@ -970,7 +981,8 @@ public sealed class ModelMappingRepairer
             newModelName.Trim(),
             newSettingName.Trim(),
             int.TryParse(newProvider, out var provider) ? provider : null,
-            string.IsNullOrWhiteSpace(newSettingLabel) ? null : newSettingLabel.Trim());
+            string.IsNullOrWhiteSpace(newSettingLabel) ? null : newSettingLabel.Trim(),
+            rowNumber);
     }
 
     /// <summary>
@@ -978,7 +990,7 @@ public sealed class ModelMappingRepairer
     /// </summary>
     /// <param name="mappings">待校验的映射列表。</param>
     /// <returns>可用于修复的有效映射列表。</returns>
-    private static IReadOnlyList<ModelMapping> ValidateMappings(List<ModelMapping> mappings)
+    private static IReadOnlyList<ModelMapping> ValidateMappings(List<ModelMapping> mappings, List<string>? validationErrors = null)
     {
         // 完全空白的行通常是 Excel 尾部空行，直接忽略。
         var validMappings = mappings
@@ -989,16 +1001,39 @@ public sealed class ModelMappingRepairer
                 !string.IsNullOrWhiteSpace(mapping.NewSettingName))
             .ToList();
 
+        var invalidRows = new List<string>();
         foreach (var mapping in validMappings)
         {
             // 旧模型、旧配置、新模型、新配置是构成映射的必填字段。
-            if (string.IsNullOrWhiteSpace(mapping.OldModelName) ||
-                string.IsNullOrWhiteSpace(mapping.OldSettingName) ||
-                string.IsNullOrWhiteSpace(mapping.NewModelName) ||
-                string.IsNullOrWhiteSpace(mapping.NewSettingName))
+            var missingColumns = new List<string>();
+            if (string.IsNullOrWhiteSpace(mapping.OldModelName))
             {
-                throw new InvalidOperationException("映射清单存在空字段：旧模型、旧参数、新模型、新参数都必须填写。");
+                missingColumns.Add("oldModelName");
             }
+            if (string.IsNullOrWhiteSpace(mapping.OldSettingName))
+            {
+                missingColumns.Add("oldSettingName");
+            }
+            if (string.IsNullOrWhiteSpace(mapping.NewModelName))
+            {
+                missingColumns.Add("newModelName");
+            }
+            if (string.IsNullOrWhiteSpace(mapping.NewSettingName))
+            {
+                missingColumns.Add("newSettingName");
+            }
+
+            if (missingColumns.Count > 0)
+            {
+                invalidRows.Add($"第 {mapping.RowNumber} 行缺少 {string.Join("、", missingColumns)}");
+            }
+        }
+
+        if (invalidRows.Count > 0)
+        {
+            AddValidationErrorOrThrow(
+                validationErrors,
+                $"model sheet 存在空字段：{Environment.NewLine}{string.Join(Environment.NewLine, invalidRows)}");
         }
 
         // 同一组旧模型/旧配置只能对应一条目标映射，避免修复结果不确定。
@@ -1007,7 +1042,9 @@ public sealed class ModelMappingRepairer
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicate != null)
         {
-            throw new InvalidOperationException($"映射清单存在重复旧模型组合: {duplicate.First().OldModelName}/{duplicate.First().OldSettingName}");
+            AddValidationErrorOrThrow(
+                validationErrors,
+                $"model sheet 存在重复 oldModelName + oldSettingName 组合: {duplicate.First().OldModelName}/{duplicate.First().OldSettingName}");
         }
 
         return validMappings;
@@ -1018,7 +1055,7 @@ public sealed class ModelMappingRepairer
     /// </summary>
     /// <param name="mappings">待校验的知识库映射列表。</param>
     /// <returns>可用于修复的有效知识库映射列表。</returns>
-    private static IReadOnlyList<KnowledgeBaseMapping> ValidateKnowledgeBaseMappings(List<KnowledgeBaseMapping> mappings)
+    private static IReadOnlyList<KnowledgeBaseMapping> ValidateKnowledgeBaseMappings(List<KnowledgeBaseMapping> mappings, List<string>? validationErrors = null)
     {
         var validMappings = mappings
             .Where(mapping =>
@@ -1026,13 +1063,30 @@ public sealed class ModelMappingRepairer
                 !string.IsNullOrWhiteSpace(mapping.LibraryId))
             .ToList();
 
+        var invalidRows = new List<string>();
         foreach (var mapping in validMappings)
         {
-            if (string.IsNullOrWhiteSpace(mapping.KnowledgeBaseName) ||
-                string.IsNullOrWhiteSpace(mapping.LibraryId))
+            var missingColumns = new List<string>();
+            if (string.IsNullOrWhiteSpace(mapping.KnowledgeBaseName))
             {
-                throw new InvalidOperationException("知识库映射清单存在空字段：knowledgeBaseName 和 libraryId 都必须填写。");
+                missingColumns.Add("knowledgeBaseName");
             }
+            if (string.IsNullOrWhiteSpace(mapping.LibraryId))
+            {
+                missingColumns.Add("libraryId");
+            }
+
+            if (missingColumns.Count > 0)
+            {
+                invalidRows.Add($"第 {mapping.RowNumber} 行缺少 {string.Join("、", missingColumns)}");
+            }
+        }
+
+        if (invalidRows.Count > 0)
+        {
+            AddValidationErrorOrThrow(
+                validationErrors,
+                $"knowledgeBase sheet 存在空字段：{Environment.NewLine}{string.Join(Environment.NewLine, invalidRows)}");
         }
 
         var duplicate = validMappings
@@ -1040,10 +1094,22 @@ public sealed class ModelMappingRepairer
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicate != null)
         {
-            throw new InvalidOperationException($"知识库映射清单存在重复知识库名称: {duplicate.First().KnowledgeBaseName}");
+            AddValidationErrorOrThrow(
+                validationErrors,
+                $"knowledgeBase sheet 存在重复 knowledgeBaseName: {duplicate.First().KnowledgeBaseName}");
         }
 
         return validMappings;
+    }
+
+    private static void AddValidationErrorOrThrow(List<string>? validationErrors, string message)
+    {
+        if (validationErrors == null)
+        {
+            throw new InvalidOperationException(message);
+        }
+
+        validationErrors.Add(message);
     }
 
     /// <summary>

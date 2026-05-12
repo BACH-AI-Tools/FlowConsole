@@ -17,6 +17,7 @@ public sealed class FlowExportPreCheckExcelGenerator
     };
 
     private const string KnowledgeBasePluginUuid = "b3e1a8d45f3b4b8e9c2e1f2a3b4c5d6e";
+    private const string GlobalAuthKeyType = "global_auth_key";
 
     public async Task<PreCheckExcelResult> GenerateAsync(
         string databaseConnectionString,
@@ -190,20 +191,32 @@ public sealed class FlowExportPreCheckExcelGenerator
 
     private static void CollectSecretKey(CollectedResources resources, JObject designParams)
     {
-        if (!string.Equals(ReadString(designParams["module"]), "API CALLER", StringComparison.OrdinalIgnoreCase) ||
-            designParams["plugin"] is not JObject plugin)
+        if (!string.Equals(ReadString(designParams["module"]), "API CALLER", StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
 
-        foreach (var parameter in EnumeratePluginParameters(plugin))
+        if (designParams["input"] is not JArray inputs)
         {
-            if (!string.Equals(ReadString(parameter["param_name"]), "apiKey", StringComparison.OrdinalIgnoreCase))
+            return;
+        }
+
+        foreach (var input in inputs.OfType<JObject>())
+        {
+            var inheritParamInfo = input["InheritParamInfo"] as JObject
+                ?? input["inheritParamInfo"] as JObject;
+            if (inheritParamInfo == null)
             {
                 continue;
             }
 
-            var secretKey = ReadString(parameter["param_value"]?["InheritParamInfo"]?["key"]);
+            var inheritType = ReadString(inheritParamInfo["type"]);
+            if (!string.Equals(inheritType, GlobalAuthKeyType, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var secretKey = ReadString(inheritParamInfo["key"]);
             if (!string.IsNullOrWhiteSpace(secretKey))
             {
                 resources.SecretKeys.Add(secretKey.Trim());

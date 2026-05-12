@@ -4,54 +4,79 @@ using Flow.DbModels;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
 
-var configuration = new ConfigurationBuilder()
-    .SetBasePath(AppContext.BaseDirectory)
-    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
-    .Build();
-
-var sourceGetFlowUrl = GetRequiredConfigurationValue(configuration, "SourceFlowApi:GetFlowUrl");
-var sourceFlowApiToken = GetRequiredConfigurationValue(configuration, "SourceFlowApi:Token");
-var databaseConnectionString = GetRequiredConfigurationValue(configuration, "ConnectionStrings:DefaultConnection");
-
-if (args.Contains("--test-db"))
+var exitCode = 0;
+try
 {
-    return await TestDatabaseAsync(databaseConnectionString);
+    exitCode = await RunAsync(args);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"程序执行失败: {ex.Message}");
+    exitCode = 1;
 }
 
-if (args.Contains("--list-flow-ids"))
-{
-    return await ListFlowIdsAsync(sourceGetFlowUrl, sourceFlowApiToken);
-}
+PromptBeforeExit();
+return exitCode;
 
-if (args.Contains("--download-sqlite"))
+static async Task<int> RunAsync(string[] args)
 {
-    return await DownloadSqliteFromConfigurationAsync(
+    var configuration = new ConfigurationBuilder()
+        .SetBasePath(AppContext.BaseDirectory)
+        .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+        .Build();
+
+    var sourceGetFlowUrl = GetRequiredConfigurationValue(configuration, "SourceFlowApi:GetFlowUrl");
+    var sourceFlowApiToken = GetRequiredConfigurationValue(configuration, "SourceFlowApi:Token");
+    var databaseConnectionString = GetRequiredConfigurationValue(configuration, "ConnectionStrings:DefaultConnection");
+
+    if (args.Contains("--test-db"))
+    {
+        return await TestDatabaseAsync(databaseConnectionString);
+    }
+
+    if (args.Contains("--list-flow-ids"))
+    {
+        return await ListFlowIdsAsync(sourceGetFlowUrl, sourceFlowApiToken);
+    }
+
+    if (args.Contains("--download-sqlite"))
+    {
+        return await DownloadSqliteFromConfigurationAsync(
+            configuration,
+            sourceGetFlowUrl,
+            sourceFlowApiToken,
+            databaseConnectionString);
+    }
+
+    if (args.Contains("--generate-mapping-excel"))
+    {
+        return await GenerateMappingExcelAsync(databaseConnectionString);
+    }
+
+    if (args.Contains("--repair-exported-sqlite"))
+    {
+        return await RepairExportedSqliteFromConfigurationAsync(configuration, databaseConnectionString);
+    }
+
+    if (args.Contains("--import-new-sqlite"))
+    {
+        return await ImportNewSqliteFromConfigurationAsync(configuration, databaseConnectionString);
+    }
+
+    return await RunInteractiveMenuAsync(
         configuration,
         sourceGetFlowUrl,
         sourceFlowApiToken,
         databaseConnectionString);
 }
 
-if (args.Contains("--generate-mapping-excel"))
+static void PromptBeforeExit()
 {
-    return await GenerateMappingExcelAsync(databaseConnectionString);
+    Console.WriteLine();
+    Console.Write("按任意键退出...");
+    Console.ReadKey(intercept: true);
+    Console.WriteLine();
 }
-
-if (args.Contains("--repair-exported-sqlite"))
-{
-    return await RepairExportedSqliteFromConfigurationAsync(configuration, databaseConnectionString);
-}
-
-if (args.Contains("--import-new-sqlite"))
-{
-    return await ImportNewSqliteFromConfigurationAsync(configuration, databaseConnectionString);
-}
-
-return await RunInteractiveMenuAsync(
-    configuration,
-    sourceGetFlowUrl,
-    sourceFlowApiToken,
-    databaseConnectionString);
 
 static string GetRequiredConfigurationValue(IConfiguration configuration, string key)
 {
@@ -122,15 +147,15 @@ static async Task<int> RunInteractiveMenuAsync(
         case "3":
             return await GenerateMappingExcelAsync(databaseConnectionString);
         case "4":
-        {
-            var repairCode = await RepairExportedSqliteFromConfigurationAsync(configuration, databaseConnectionString);
-            if (repairCode != 0)
             {
-                return repairCode;
-            }
+                var repairCode = await RepairExportedSqliteFromConfigurationAsync(configuration, databaseConnectionString);
+                if (repairCode != 0)
+                {
+                    return repairCode;
+                }
 
-            return await ImportNewSqliteFromConfigurationAsync(configuration, databaseConnectionString);
-        }
+                return await ImportNewSqliteFromConfigurationAsync(configuration, databaseConnectionString);
+            }
         case "5":
             return await ImportNewSqliteFromConfigurationAsync(configuration, databaseConnectionString);
         case "L":
@@ -267,7 +292,7 @@ static async Task<int> SelectTargetCategoryIdAsync(string categoryUrl, string to
             return selectedId;
         }
 
-        Console.WriteLine("输入的分类 ID 不在列表中，请重新输入。");
+        Console.WriteLine("输入的分类编号不在列表中，请重新输入。");
     }
 }
 
@@ -389,6 +414,7 @@ static async Task<int> DownloadSqliteAsync(
             maxWaitTime);
 
         FlowSqliteExporter.ClearSqliteDirectory();
+        ClearNewSqliteDirectory();
 
         Console.WriteLine("流程 ID 收集完成");
         Console.WriteLine($"root_flow_ids: {string.Join(", ", rootFlowIds)}");
@@ -473,9 +499,8 @@ static async Task<int> RepairExportedSqliteAsync(
             throw new FileNotFoundException("找不到映射 Excel。", mappingPath);
         }
 
-        Directory.CreateDirectory(newSqliteDirectory);
         ModelMappingRepairer.ValidateMappingFile(mappingPath);
-        ClearDirectoryFiles(newSqliteDirectory);
+        ClearNewSqliteDirectory();
 
         var sqlitePaths = Directory
             .EnumerateFiles(sqliteDirectory, "*.db", SearchOption.TopDirectoryOnly)
@@ -594,15 +619,30 @@ static async Task<int> ImportNewSqliteAsync(
     }
 }
 
-static void ClearDirectoryFiles(string directory)
+static int ClearDirectoryFiles(string directory)
 {
     SqliteConnection.ClearAllPools();
     GC.Collect();
     GC.WaitForPendingFinalizers();
 
+    var deletedCount = 0;
     foreach (var filePath in Directory.EnumerateFiles(directory))
     {
         DeleteFileWithRetry(filePath);
+        deletedCount++;
+    }
+
+    return deletedCount;
+}
+
+static void ClearNewSqliteDirectory()
+{
+    var newSqliteDirectory = Path.Combine(AppContext.BaseDirectory, "flowExt", "newSqlite");
+    Directory.CreateDirectory(newSqliteDirectory);
+    var deletedCount = ClearDirectoryFiles(newSqliteDirectory);
+    if (deletedCount > 0)
+    {
+        Console.WriteLine($"已清空旧 newSqlite 目录: {newSqliteDirectory}");
     }
 }
 

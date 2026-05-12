@@ -1,5 +1,7 @@
 using ClosedXML.Excel;
+using Flow.DbModels;
 using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -38,7 +40,8 @@ public sealed record KnowledgeBaseMapping(
 public sealed record RepairOptions(
     string InputPath,
     string MappingPath,
-    string OutputPath);
+    string OutputPath,
+    string? DatabaseConnectionString = null);
 
 /// <summary>
 /// 表示一次成功替换模型配置的记录。
@@ -173,6 +176,16 @@ public sealed class ModelMappingRepairer
     private const string KnowledgeBasePluginName = "知识库插件Pro";
 
     /// <summary>
+    /// 校验映射 Excel 是否满足修复要求。
+    /// </summary>
+    /// <param name="mappingPath">映射清单文件路径。</param>
+    public static void ValidateMappingFile(string mappingPath)
+    {
+        _ = LoadMappings(mappingPath);
+        _ = MappingExcelSecretSynchronizer.LoadAndValidateApiCallerSecrets(mappingPath);
+    }
+
+    /// <summary>
     /// 执行完整的模型映射修复流程。
     /// </summary>
     /// <param name="options">修复命令参数。</param>
@@ -184,7 +197,11 @@ public sealed class ModelMappingRepairer
 
         // 先读取映射清单，并构造成按“旧模型 + 旧配置”快速查找的字典。
         var mappingWorkbook = LoadMappings(options.MappingPath);
-        var map = mappingWorkbook.ModelMappings.ToDictionary(
+        var modelMappings = await FillModelSettingLabelsAsync(
+            mappingWorkbook.ModelMappings,
+            options.DatabaseConnectionString,
+            cancellationToken);
+        var map = modelMappings.ToDictionary(
             mapping => MakeKey(mapping.OldModelName, mapping.OldSettingName),
             mapping => mapping,
             MappingKeyComparer);
@@ -266,6 +283,92 @@ public sealed class ModelMappingRepairer
         };
     }
 
+    private static async Task<IReadOnlyList<ModelMapping>> FillModelSettingLabelsAsync(
+        IReadOnlyList<ModelMapping> mappings,
+        string? databaseConnectionString,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(databaseConnectionString) || mappings.Count == 0)
+        {
+            return mappings;
+        }
+
+        var settingNames = mappings
+            .Select(mapping => mapping.NewSettingName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(MappingKeyComparer)
+            .ToList();
+
+        if (settingNames.Count == 0)
+        {
+            return mappings;
+        }
+
+        var options = new DbContextOptionsBuilder<FlowDbContext>()
+            .UseSqlServer(databaseConnectionString)
+            .Options;
+        await using var dbContext = new FlowDbContext(options);
+
+        var settings = await dbContext.TLlmPromptSettings
+            .AsNoTracking()
+            .Where(setting => settingNames.Contains(setting.Name!) && !setting.IsDelete)
+            .Select(setting => new
+            {
+                setting.Name,
+                setting.Describe
+            })
+            .ToListAsync(cancellationToken);
+
+        var labelBySettingName = settings
+            .Where(setting => !string.IsNullOrWhiteSpace(setting.Name))
+            .GroupBy(setting => setting.Name!, MappingKeyComparer)
+            .ToDictionary(
+                group => group.Key,
+                group => ReadCnLabel(group.First().Describe) ?? string.Empty,
+                MappingKeyComparer);
+
+        foreach (var settingName in settingNames)
+        {
+            if (!labelBySettingName.TryGetValue(settingName, out var label) ||
+                string.IsNullOrWhiteSpace(label))
+            {
+                throw new InvalidOperationException(
+                    $"目标环境 t_llm_prompt_setting 中未找到有效的 describe.cn，newSettingName={settingName}");
+            }
+        }
+
+        return mappings
+            .Select(mapping =>
+            {
+                var label = labelBySettingName[mapping.NewSettingName];
+                return mapping with { NewSettingLabel = label };
+            })
+            .ToList();
+    }
+
+    private static string? ReadCnLabel(string? describe)
+    {
+        if (string.IsNullOrWhiteSpace(describe))
+        {
+            return null;
+        }
+
+        try
+        {
+            var token = JToken.Parse(describe);
+            if (token is JObject json)
+            {
+                return ReadString(json["cn"]);
+            }
+        }
+        catch (JsonException)
+        {
+            return describe;
+        }
+
+        return describe;
+    }
+
     /// <summary>
     /// 校验命令参数和输入文件是否满足修复要求。
     /// </summary>
@@ -314,7 +417,7 @@ public sealed class ModelMappingRepairer
         var fileName = Path.GetFileNameWithoutExtension(inputPath);
         var extension = Path.GetExtension(inputPath);
         var timestamp = DateTime.Now.ToString("yyyyMMddHHmmss");
-        var timestampedFileName = $"{fileName}_{timestamp}{extension}";
+        var timestampedFileName = $"{fileName}_new_{timestamp}{extension}";
 
         return Path.Combine(outputDirectory, timestampedFileName);
     }
@@ -730,7 +833,8 @@ public sealed class ModelMappingRepairer
             throw new InvalidOperationException("模型映射清单必须是 .xlsx Excel 文件。");
         }
 
-        using var workbook = new XLWorkbook(mappingPath);
+        using var mappingStream = new FileStream(mappingPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var workbook = new XLWorkbook(mappingStream);
         return new MappingWorkbook(
             LoadModelMappings(workbook),
             LoadKnowledgeBaseMappings(workbook));
@@ -794,7 +898,7 @@ public sealed class ModelMappingRepairer
     }
 
     /// <summary>
-    /// 从 Excel 第二个 sheet 加载知识库名称到 libraryid 的映射清单。
+    /// 从 Excel 第二个 sheet 加载知识库名称到 libraryId 的映射清单。
     /// </summary>
     /// <param name="workbook">Excel 工作簿。</param>
     /// <returns>通过校验的知识库映射列表；没有第二个 sheet 时返回空列表。</returns>
@@ -836,7 +940,7 @@ public sealed class ModelMappingRepairer
 
             mappings.Add(new KnowledgeBaseMapping(
                 GetValue("knowledgeBaseName", "knowledge_base_name", "知识库名称", "第三方知识库名称"),
-                GetValue("libraryid", "libraryId", "library_id", "知识库id", "知识库ID")));
+                GetValue("libraryId", "library_id", "知识库id", "知识库ID")));
         }
 
         return ValidateKnowledgeBaseMappings(mappings);
@@ -927,7 +1031,7 @@ public sealed class ModelMappingRepairer
             if (string.IsNullOrWhiteSpace(mapping.KnowledgeBaseName) ||
                 string.IsNullOrWhiteSpace(mapping.LibraryId))
             {
-                throw new InvalidOperationException("知识库映射清单存在空字段：knowledgeBaseName 和 libraryid 都必须填写。");
+                throw new InvalidOperationException("知识库映射清单存在空字段：knowledgeBaseName 和 libraryId 都必须填写。");
             }
         }
 

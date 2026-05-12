@@ -16,6 +16,7 @@ catch (Exception ex)
     exitCode = 1;
 }
 
+// 等待用户确认后再关闭控制台窗口，方便查看执行结果。
 PromptBeforeExit();
 return exitCode;
 

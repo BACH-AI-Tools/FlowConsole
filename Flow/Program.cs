@@ -727,11 +727,17 @@ static void DeleteFileWithRetry(string filePath)
 // 从 flowExt/flow_ids.txt 读取根流程 ID，并保持文件中的首次出现顺序。
 static async Task<IReadOnlyList<string>> ReadRootFlowIdsAsync()
 {
-    var flowIdsPath = Path.Combine(AppContext.BaseDirectory, "flowExt", "flow_ids.txt");
+    var flowExtDirectory = Path.Combine(AppContext.BaseDirectory, "flowExt");
+    if (!Directory.Exists(flowExtDirectory))
+    {
+        Directory.CreateDirectory(flowExtDirectory);
+    }
+
+    var flowIdsPath = Path.Combine(flowExtDirectory, "flow_ids.txt");
 
     if (!File.Exists(flowIdsPath))
     {
-        throw new InvalidOperationException($"flow_id 文件不存在: {flowIdsPath}");
+        throw new InvalidOperationException($"flow_ids 文件不存在: {flowIdsPath}");
     }
 
     var lines = await File.ReadAllLinesAsync(flowIdsPath);
@@ -758,7 +764,7 @@ static async Task<IReadOnlyList<string>> ReadRootFlowIdsAsync()
 
     if (rootFlowIds.Count == 0)
     {
-        throw new InvalidOperationException($"flow_id 文件内容为空: {flowIdsPath}");
+        throw new InvalidOperationException($"flow_ids 文件内容为空: {flowIdsPath}");
     }
 
     return rootFlowIds;
